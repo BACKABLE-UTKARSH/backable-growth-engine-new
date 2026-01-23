@@ -11072,10 +11072,12 @@ async def verify_jwt_token(authorization: str = Header(None)) -> Dict:
             detail=f"Invalid token: {str(e)}"
         )
     except Exception as e:
+        import traceback
         logging.error(f"Token validation error: {e}")
+        logging.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error validating token"
+            detail=f"Error validating token: {str(e)}"
         )
 
 # ======================================================
