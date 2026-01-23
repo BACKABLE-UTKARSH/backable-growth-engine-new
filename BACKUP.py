@@ -20,13 +20,10 @@ import io
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
-from fastapi import FastAPI, Request, Response, HTTPException, BackgroundTasks, Depends, Header, status
+from fastapi import FastAPI, Request, Response, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
-import jwt
-import hashlib
-from psycopg2.extras import RealDictCursor
 from azure.storage.blob import BlobServiceClient, ContainerClient, ContentSettings
 import psycopg2
 import uvicorn
@@ -10944,158 +10941,6 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# ======================================================
-#           JWT Authentication Configuration
-# ======================================================
-
-# JWT Secret Key - must match the key used by philotimo-backend
-JWT_SECRET = os.getenv("JWT_SECRET", "philotimo-global-jwt-secret-2024!!")  # Production JWT secret
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-
-# Philotimo database configuration for token validation
-PHILOTIMO_DB_CONFIG = {
-    "host": "memberchat-db.postgres.database.azure.com",
-    "database": "philotimodb",
-    "user": "backable",
-    "password": "Utkar$h007",
-    "port": 5432,
-    "sslmode": "require"
-}
-
-def hash_token(token: str) -> str:
-    """Hash a JWT token using SHA256 for database comparison"""
-    return hashlib.sha256(token.encode()).hexdigest()
-
-async def verify_jwt_token(authorization: str = Header(None)) -> Dict:
-    """
-    Verify JWT token from Authorization header and validate against database
-
-    Returns:
-        Dict containing: user_id, client_id, email, jti
-
-    Raises:
-        HTTPException: If token is invalid, expired, or revoked
-    """
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authorization header",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-
-    # Extract token from "Bearer <token>" format
-    parts = authorization.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format. Expected 'Bearer <token>'",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-
-    token = parts[1]
-
-    try:
-        # Decode JWT token
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-
-        # Extract claims
-        user_id = payload.get("sub")
-        email = payload.get("email")
-        jti = payload.get("jti")
-
-        if not user_id or not jti:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload: missing required claims"
-            )
-
-        # Hash the token for database lookup
-        token_hash = hash_token(token)
-
-        # Validate token against database
-        conn = None
-        try:
-            conn = psycopg2.connect(**PHILOTIMO_DB_CONFIG)
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Join api_tokens with users to get client_id
-                cur.execute("""
-                    SELECT
-                        at.user_id,
-                        at.is_active,
-                        at.revoked,
-                        u.client_id
-                    FROM api_tokens at
-                    LEFT JOIN users u ON at.user_id = u.user_id
-                    WHERE at.token_hash = %s AND at.jti = %s
-                """, (token_hash, jti))
-
-                token_record = cur.fetchone()
-
-                if not token_record:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Token not found in database"
-                    )
-
-                if token_record["revoked"]:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Token has been revoked"
-                    )
-
-                if not token_record["is_active"]:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Token is inactive"
-                    )
-
-                # Return authenticated user info
-                return {
-                    "user_id": int(token_record["user_id"]),
-                    "client_id": token_record.get("client_id"),
-                    "email": email,
-                    "jti": jti
-                }
-
-        finally:
-            if conn:
-                conn.close()
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
-        )
-    except jwt.InvalidTokenError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}"
-        )
-    except Exception as e:
-        logging.error(f"Token validation error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error validating token"
-        )
-
-# ======================================================
-#                   API Endpoints
-# ======================================================
-
-@app.get("/auth/me")
-async def get_authenticated_user(auth: Dict = Depends(verify_jwt_token)):
-    """
-    Get authenticated user information from JWT token
-    This endpoint allows the frontend to verify authentication and get user_id
-    """
-    return {
-        "status": "success",
-        "user_id": str(auth["user_id"]),
-        "client_id": auth.get("client_id"),
-        "email": auth.get("email"),
-        "authenticated": True
-    }
-
 @app.get("/")
 async def root():
     return {
@@ -11198,16 +11043,9 @@ async def health_check():
     }
 
 @app.post("/growth-audit/{user_id}")
-async def process_growth_audit(user_id: str, request: GrowthAssessmentRequest, auth: Dict = Depends(verify_jwt_token)):
+async def process_growth_audit(user_id: str, request: GrowthAssessmentRequest):
     """Process comprehensive growth audit with multi-database intelligence - FIXED"""
-
-    # Permission check: user can only access their own data
-    if int(user_id) != auth["user_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only access your own growth audit data"
-        )
-
+    
     start_time = time.time()
     logging.info(f"🚀 Starting Growth Audit for user_id={user_id}")
     
@@ -11367,12 +11205,9 @@ async def process_growth_audit(user_id: str, request: GrowthAssessmentRequest, a
         raise HTTPException(status_code=500, detail=error_message)
 
 @app.get("/growth_report_status/{report_id}")
-async def get_growth_report_status(report_id: str, auth: Dict = Depends(verify_jwt_token)):
+async def get_growth_report_status(report_id: str):
     """Get growth report generation status"""
-
-    # No permission check here - report_id doesn't directly contain user_id
-    # The user must know the report_id to check its status
-
+    
     if report_id not in growth_job_status:
         # Try to get status from database
         conn = None
@@ -11410,16 +11245,9 @@ async def get_growth_report_status(report_id: str, auth: Dict = Depends(verify_j
     return growth_job_status[report_id]
 
 @app.post("/growth_assessment_progress")
-async def save_growth_progress(request: GrowthProgressRequest, auth: Dict = Depends(verify_jwt_token)):
+async def save_growth_progress(request: GrowthProgressRequest):
     """Save growth assessment progress with enhanced tracking"""
-
-    # Permission check: user can only save their own progress
-    if int(request.user_id) != auth["user_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only save your own progress"
-        )
-
+    
     try:
         logging.info(f"💾 Saving growth progress for user {request.user_id}")
         logging.info(f"📊 Progress details: expansion {request.current_expansion}, auto_save: {request.auto_save}")
@@ -11571,16 +11399,9 @@ async def check_notification_health():
 
 
 @app.get("/growth_assessment_progress/{user_id}")
-async def get_growth_progress(user_id: str, auth: Dict = Depends(verify_jwt_token)):
+async def get_growth_progress(user_id: str):
     """Get saved growth assessment progress for a user"""
-
-    # Permission check: user can only access their own progress
-    if int(user_id) != auth["user_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only access your own progress"
-        )
-
+    
     conn = None
     try:
         logging.info(f"📥 Retrieving growth progress for user {user_id}")
@@ -11667,16 +11488,9 @@ async def get_growth_progress(user_id: str, auth: Dict = Depends(verify_jwt_toke
 
 
 @app.get("/growth_reports/{user_id}")
-async def get_user_growth_reports(user_id: str, auth: Dict = Depends(verify_jwt_token)):
+async def get_user_growth_reports(user_id: str):
     """Get all growth reports for a user"""
-
-    # Permission check: user can only access their own reports
-    if int(user_id) != auth["user_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only access your own reports"
-        )
-
+    
     conn = None
     try:
         conn = get_growth_connection()
