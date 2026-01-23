@@ -11020,14 +11020,15 @@ async def verify_jwt_token(authorization: str = Header(None)) -> Dict:
                 # Join api_tokens with users to get client_id
                 cur.execute("""
                     SELECT
-                        at.user_id,
-                        at.is_active,
-                        at.revoked,
-                        u.client_id
-                    FROM api_tokens at
-                    LEFT JOIN users u ON at.user_id = u.user_id
-                    WHERE at.token_hash = %s AND at.jti = %s
-                """, (token_hash, jti))
+                        t.user_id,
+                        t.is_revoked AS revoked,
+                        t.expires_at,
+                        u.client_id,
+                        u.email
+                    FROM api_tokens t
+                    JOIN users u ON t.user_id = u.id
+                    WHERE t.jti = %s AND t.token_hash = %s
+                """, (jti, token_hash))
 
                 token_record = cur.fetchone()
 
@@ -11037,23 +11038,25 @@ async def verify_jwt_token(authorization: str = Header(None)) -> Dict:
                         detail="Token not found in database"
                     )
 
+                # Check if token is revoked
                 if token_record["revoked"]:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Token has been revoked"
                     )
 
-                if not token_record["is_active"]:
+                # Check if token is expired (database-level check)
+                if token_record['expires_at'] and token_record['expires_at'] < datetime.now(token_record['expires_at'].tzinfo):
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Token is inactive"
+                        detail="Token has expired"
                     )
 
                 # Return authenticated user info
                 return {
                     "user_id": int(token_record["user_id"]),
                     "client_id": token_record.get("client_id"),
-                    "email": email,
+                    "email": token_record.get("email"),
                     "jti": jti
                 }
 
