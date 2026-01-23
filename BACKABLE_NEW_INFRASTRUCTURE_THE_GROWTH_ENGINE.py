@@ -10954,10 +10954,10 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 # Philotimo database configuration for token validation
 PHILOTIMO_DB_CONFIG = {
-    "host": "memberchat-db.postgres.database.azure.com",
+    "host": "philotimo-staging-db.postgres.database.azure.com",
     "database": "philotimodb",
-    "user": "backable",
-    "password": "Utkar$h007",
+    "user": "wchen",
+    "password": "DevPhilot2024!!",
     "port": 5432,
     "sslmode": "require"
 }
